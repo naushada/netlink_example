@@ -57,6 +57,7 @@ class NetlinkTest : public ACE_Event_Handler {
                           IFF_PROMISC   |
                           IFF_ONE_QUEUE;
 
+          strncpy(ifr.ifr_name, "fwd_intf0", IFNAMSIZ);
           if(ACE_OS::ioctl(m_tunFd, TUNSETIFF, (void *) &ifr) < 0) {
             ACE_ERROR((LM_ERROR,
                        ACE_TEXT("(%P|%t) ioctl for /dev/net/tun - failed\n")
@@ -139,9 +140,7 @@ int NetlinkTest::install_tunIP(std::string srcIP_, std::string destIP_, std::str
 {
   int32_t fd;
   struct ifreq ifr;
-  ACE_SOCK_Dgram udpSock;
   fd = socket(AF_INET, SOCK_DGRAM, 0);
-  //fd = udpSock.get_handle();
 
   memset((void *)&ifr, 0, sizeof(struct ifreq));
 
@@ -155,16 +154,6 @@ int NetlinkTest::install_tunIP(std::string srcIP_, std::string destIP_, std::str
   ifr.ifr_name[IFNAMSIZ-1] = 0;
   struct in_addr IP;
 
-  std::string newName("fwd0");
-  strncpy(ifr.ifr_newname, newName.c_str(), IFNAMSIZ);
-
-  if(ioctl(fd, SIOCSIFNAME, (void *) &ifr) < 0) {
-   fprintf(stderr, "\n%s:%d renaming of tunnel intf failed\n", __FILE__, __LINE__);
-   perror("\n renaming of tunnel intf :");
-   return(-1);
-  }
-
-  strncpy(ifr.ifr_name, (const char *)newName.c_str(), IFNAMSIZ);
   if(srcIP_.length()) {
     inet_aton(srcIP_.c_str(), &IP);
     ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr = IP.s_addr;
