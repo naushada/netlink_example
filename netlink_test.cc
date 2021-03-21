@@ -3,6 +3,7 @@
 #include "ace/Log_Msg.h"
 #include "ace/Netlink_Addr.h"
 #include "ace/SOCK_Netlink.h"
+#include "ace/SOCK_Dgram.h"
 
 #include <net/if.h>
 #include <asm/types.h>
@@ -39,8 +40,8 @@ class NetlinkTest : public ACE_Event_Handler {
       else {
         do {
           struct ifreq ifr;
-          int fd = open("/dev/net/tun", O_RDWR);
-          if(fd < 0) {
+          m_tunFd = open("/dev/net/tun", O_RDWR);
+          if(m_tunFd < 0) {
             ACE_ERROR((LM_ERROR,
                        ACE_TEXT("(%P|%t) open for /dev/net/tun - failed\n")
                        ACE_TEXT("to initialize netlink socket open ().\n")));
@@ -56,7 +57,7 @@ class NetlinkTest : public ACE_Event_Handler {
                           IFF_PROMISC   |
                           IFF_ONE_QUEUE;
 
-          if(ACE_OS::ioctl(fd, TUNSETIFF, (void *) &ifr) < 0) {
+          if(ACE_OS::ioctl(m_tunFd, TUNSETIFF, (void *) &ifr) < 0) {
             ACE_ERROR((LM_ERROR,
                        ACE_TEXT("(%P|%t) ioctl for /dev/net/tun - failed\n")
                        ACE_TEXT("to initialize netlink socket open ().\n")));
@@ -68,6 +69,7 @@ class NetlinkTest : public ACE_Event_Handler {
 
           ACE_DEBUG((LM_DEBUG, ACE_TEXT("(%P) the dev name is %s\n"), m_tun_intf_name.c_str()));
           ACE_Reactor::instance()->register_handler(this, ACE_Event_Handler::READ_MASK);
+          ACE_Reactor::instance()->register_handler(m_tunFd, this, ACE_Event_Handler::READ_MASK);
         }while(0);
       }
     }
@@ -102,12 +104,13 @@ class NetlinkTest : public ACE_Event_Handler {
     int add_ip();
     int delete_ip();
 
+    int install_tunIP(std::string srcIP_, std::string destIP_, std::string mack_);
   private:
     std::string m_intf_name;
     std::string m_ip;
     std::string m_mask;
     std::string m_tun_intf_name;
-
+    ACE_HANDLE m_tunFd;
     // The socket.
     ACE_SOCK_Netlink socket_ ;
     // The address of the socket.
@@ -128,7 +131,81 @@ NetlinkTest::~NetlinkTest()
 
 ACE_HANDLE NetlinkTest::get_handle() const
 {
+  ACE_DEBUG((LM_INFO, ACE_TEXT("%s\n"), __PRETTY_FUNCTION__));
   return(socket_.get_handle());
+}
+
+int NetlinkTest::install_tunIP(std::string srcIP_, std::string destIP_, std::string mask_)
+{
+  int32_t fd;
+  struct ifreq ifr;
+  ACE_SOCK_Dgram udpSock;
+  fd = socket(AF_INET, SOCK_DGRAM, 0);
+  //fd = udpSock.get_handle();
+
+  memset((void *)&ifr, 0, sizeof(struct ifreq));
+
+  strncpy(ifr.ifr_name, (const char *)m_tun_intf_name.c_str(), IFNAMSIZ);
+
+  ifr.ifr_addr.sa_family = AF_INET;
+  ifr.ifr_dstaddr.sa_family = AF_INET;
+  ifr.ifr_netmask.sa_family = AF_INET;
+
+  /*Make sure to null terminate*/
+  ifr.ifr_name[IFNAMSIZ-1] = 0;
+  struct in_addr IP;
+
+  std::string newName("fwd0");
+  strncpy(ifr.ifr_newname, newName.c_str(), IFNAMSIZ);
+
+  if(ioctl(fd, SIOCSIFNAME, (void *) &ifr) < 0) {
+   fprintf(stderr, "\n%s:%d renaming of tunnel intf failed\n", __FILE__, __LINE__);
+   perror("\n renaming of tunnel intf :");
+   return(-1);
+  }
+
+  strncpy(ifr.ifr_name, (const char *)newName.c_str(), IFNAMSIZ);
+  if(srcIP_.length()) {
+    inet_aton(srcIP_.c_str(), &IP);
+    ((struct sockaddr_in *)&ifr.ifr_addr)->sin_addr.s_addr = IP.s_addr;
+
+    if (ioctl(fd, SIOCSIFADDR, (void *) &ifr) < 0) {
+     fprintf(stderr, "Setting of interface address failed\n");
+     return(-1);
+    }
+  }
+
+  if(destIP_.length()) {
+    inet_aton(destIP_.c_str(), &IP);
+    ((struct sockaddr_in *)&ifr.ifr_dstaddr)->sin_addr.s_addr = IP.s_addr;
+
+    if(ioctl(fd, SIOCSIFDSTADDR, (void *) &ifr) < 0) {
+     fprintf(stderr, "Setting of interface DESTINATION IP FAILED failed\n");
+     return(-1);
+    }
+  }
+
+  if(mask_.length()) {
+    inet_aton(mask_.c_str(), &IP);
+    ((struct sockaddr_in *)&ifr.ifr_netmask)->sin_addr.s_addr = IP.s_addr;
+
+    if(ioctl(fd, SIOCSIFNETMASK, (void *) &ifr) < 0) {
+     fprintf(stderr, "\n%s:%dSetting of interface NETMASK failed\n", __FILE__, __LINE__);
+     perror("\nSetting of netmask failed:");
+     return(-1);
+    }
+  }
+
+
+
+  ifr.ifr_flags = IFF_UP | IFF_RUNNING;
+  if(ioctl(fd, SIOCSIFFLAGS, &ifr)) {
+    perror("Setting of Flags Failed");
+    return(-1);
+  }
+
+  close(fd);
+  return(0);
 }
 
 int NetlinkTest::handle_input(ACE_HANDLE fd)
@@ -319,6 +396,8 @@ int main()
 
   NetlinkTest nTest(intf, ip, mask);
   nTest.add_ip();
+
+  nTest.install_tunIP("10.10.10.2", "10.10.10.2", "255.255.255.0");
 #if 0
   nTest.intf("enp0s9:1");
   nTest.ip("10.11.10.2");
