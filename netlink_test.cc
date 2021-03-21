@@ -10,7 +10,7 @@
 #include <linux/rtnetlink.h>
 #include <string>
 #include <bitset>
-
+#include <linux/if_tun.h>
 
 
 class NetlinkTest : public ACE_Event_Handler {
@@ -37,7 +37,38 @@ class NetlinkTest : public ACE_Event_Handler {
                    ACE_TEXT("to initialize netlink socket open ().\n")));
       }
       else {
-        ACE_Reactor::instance()->register_handler(this, ACE_Event_Handler::READ_MASK);
+        do {
+          struct ifreq ifr;
+          int fd = open("/dev/net/tun", O_RDWR);
+          if(fd < 0) {
+            ACE_ERROR((LM_ERROR,
+                       ACE_TEXT("(%P|%t) open for /dev/net/tun - failed\n")
+                       ACE_TEXT("to initialize netlink socket open ().\n")));
+            break;
+          }
+
+          memset((void *)&ifr, 0, sizeof(struct ifreq));
+
+          ifr.ifr_flags = IFF_TUN       |
+                          IFF_NO_PI     |
+                          IFF_MULTICAST |
+                          IFF_BROADCAST |
+                          IFF_PROMISC   |
+                          IFF_ONE_QUEUE;
+
+          if(ACE_OS::ioctl(fd, TUNSETIFF, (void *) &ifr) < 0) {
+            ACE_ERROR((LM_ERROR,
+                       ACE_TEXT("(%P|%t) ioctl for /dev/net/tun - failed\n")
+                       ACE_TEXT("to initialize netlink socket open ().\n")));
+            break;
+          }
+
+          std::string tun_dev(ifr.ifr_name, IFNAMSIZ);
+          m_tun_intf_name = tun_dev;
+
+          ACE_DEBUG((LM_DEBUG, ACE_TEXT("(%P) the dev name is %s\n"), m_tun_intf_name.c_str()));
+          ACE_Reactor::instance()->register_handler(this, ACE_Event_Handler::READ_MASK);
+        }while(0);
       }
     }
 
@@ -75,6 +106,7 @@ class NetlinkTest : public ACE_Event_Handler {
     std::string m_intf_name;
     std::string m_ip;
     std::string m_mask;
+    std::string m_tun_intf_name;
 
     // The socket.
     ACE_SOCK_Netlink socket_ ;
@@ -179,36 +211,42 @@ int NetlinkTest::add_ip()
 
   // fill the request header
   netlink_request_.nhdr_.nlmsg_len = NLMSG_LENGTH(sizeof(struct ifaddrmsg));
-  netlink_request_.nhdr_.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+  netlink_request_.nhdr_.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE;
   netlink_request_.nhdr_.nlmsg_type = RTM_NEWADDR;
   netlink_request_.nhdr_.nlmsg_pid = address_.get_pid();
   netlink_request_.nhdr_.nlmsg_seq = ++seq_;
 
   netlink_request_.ifa_.ifa_prefixlen = bit_count(m_mask);
-  netlink_request_.ifa_.ifa_scope = 0;
+  netlink_request_.ifa_.ifa_flags = IFA_F_SECONDARY;
+  netlink_request_.ifa_.ifa_scope = RT_SCOPE_HOST;
   netlink_request_.ifa_.ifa_family = AF_INET;
+  //netlink_request_.ifa_.ifa_index = if_nametoindex(m_tun_intf_name.c_str());
   netlink_request_.ifa_.ifa_index = if_nametoindex(m_intf_name.c_str());
 
   struct rtattr *rta = reinterpret_cast <struct rtattr*> (((reinterpret_cast <char*>(&netlink_request_.nhdr_)) + NLMSG_ALIGN (netlink_request_.nhdr_.nlmsg_len)));
 
+  std::string label("enp0s9:1");
+  rta->rta_type = IFA_LABEL;
+  rta->rta_len = RTA_LENGTH (label.length());
+  ACE_OS::memcpy (RTA_DATA(rta), (const void *)label.c_str(), label.length());
+
+  netlink_request_.nhdr_.nlmsg_len = NLMSG_ALIGN (netlink_request_.nhdr_.nlmsg_len) + RTA_LENGTH (label.length());
+
+  rta = reinterpret_cast <struct rtattr*> (((reinterpret_cast <char*>(&netlink_request_.nhdr_)) + NLMSG_ALIGN (netlink_request_.nhdr_.nlmsg_len)));
+
   rta->rta_type = IFA_LOCAL;
   rta->rta_len = RTA_LENGTH (4);
   ACE_OS::memcpy (RTA_DATA(rta), (const void *)&IP.s_addr, 4);
-
   netlink_request_.nhdr_.nlmsg_len = NLMSG_ALIGN (netlink_request_.nhdr_.nlmsg_len) + RTA_LENGTH (4);
 
-  iovec iov_send =
-  {
-    static_cast <void*> (&netlink_request_.nhdr_),
-    netlink_request_.nhdr_.nlmsg_len
-  };
+  iovec iov_send = { static_cast <void*> (&netlink_request_.nhdr_), netlink_request_.nhdr_.nlmsg_len };
 
   ACE_Netlink_Addr  addr_send;
   addr_send.set (0, 0);
 
-  if(socket_.send (&iov_send,
-                   1,
-                   addr_send) < 0) {
+  if(socket_.send(&iov_send,
+                  1,
+                  addr_send) < 0) {
     ACE_ERROR_RETURN ((LM_ERROR,
                        ACE_TEXT("%s - ")
                        ACE_TEXT("send of request failed with errno %d.\n"),
@@ -275,22 +313,23 @@ int NetlinkTest::delete_ip()
 int main()
 {
   std::string intf("enp0s9");
-  //std::string ip("10.10.10.1");
-  std::string ip("10.11.10.20");
+  std::string ip("10.10.10.1");
+  //std::string ip("10.11.10.20");
   std::string mask("255.255.255.0");
 
   NetlinkTest nTest(intf, ip, mask);
-
   nTest.add_ip();
+#if 0
   nTest.intf("enp0s9:1");
-  nTest.ip("10.11.10.1");
-  nTest.mask("255.255.255.0");
-  nTest.add_ip();
-
-  nTest.intf("enp0s9:2");
   nTest.ip("10.11.10.2");
   nTest.mask("255.255.255.0");
   nTest.add_ip();
+
+  nTest.intf("enp0s9:3");
+  nTest.ip("10.11.10.2");
+  nTest.mask("255.255.255.0");
+  nTest.add_ip();
+#endif
 
   while(1) {
     ACE_Reactor::instance()->handle_events();
